@@ -744,11 +744,35 @@ class UptodownBrowserSession:
                         break
             time.sleep(0.5)
 
-    def click(self, x: float, y: float) -> None:
+    def viewport(self) -> dict[str, int]:
+        if not self.cdp:
+            return {"width": 1280, "height": 900}
+        try:
+            result = self.cdp.command(
+                "Runtime.evaluate",
+                {
+                    "expression": "JSON.stringify({width: window.innerWidth, height: window.innerHeight})",
+                    "returnByValue": True,
+                },
+            )
+            value = result.get("result", {}).get("result", {}).get("value")
+            dimensions = json.loads(str(value))
+            width = int(dimensions.get("width", 1280))
+            height = int(dimensions.get("height", 900))
+            if width > 0 and height > 0:
+                return {"width": width, "height": height}
+        except (ConnectionError, OSError, ValueError, TypeError, TimeoutError):
+            pass
+        return {"width": 1280, "height": 900}
+
+    def click(self, x: float, y: float, image_width: float, image_height: float) -> None:
         if not self.cdp:
             raise ValueError("Remote browser is not ready")
-        width = max(0.0, min(1280.0, float(x)))
-        height = max(0.0, min(900.0, float(y)))
+        if image_width <= 0 or image_height <= 0:
+            raise ValueError("remote browser screenshot dimensions are invalid")
+        viewport = self.viewport()
+        width = max(0.0, min(float(viewport["width"]), float(x) * viewport["width"] / image_width))
+        height = max(0.0, min(float(viewport["height"]), float(y) * viewport["height"] / image_height))
         self.cdp.command(
             "Input.dispatchMouseEvent",
             {"type": "mousePressed", "x": width, "y": height, "button": "left", "clickCount": 1},
@@ -757,6 +781,69 @@ class UptodownBrowserSession:
             "Input.dispatchMouseEvent",
             {"type": "mouseReleased", "x": width, "y": height, "button": "left", "clickCount": 1},
         )
+
+    def auto_click_download(self) -> dict[str, object]:
+        if not self.cdp:
+            raise ValueError("Remote browser is not ready")
+        find_script = r"""
+            (() => {
+              const terms = /\b(download|download apk|get apk|download now)\b/i;
+              const visible = (node) => {
+                const box = node.getBoundingClientRect();
+                const style = window.getComputedStyle(node);
+                return box.width > 0 && box.height > 0 &&
+                  style.visibility !== "hidden" && style.display !== "none";
+              };
+              const candidates = [...document.querySelectorAll(
+                "a, button, [role='button'], input[type='button'], input[type='submit']"
+              )];
+              const target = candidates.find((node) => {
+                const text = [
+                  node.innerText || "",
+                  node.getAttribute("aria-label") || "",
+                  node.getAttribute("title") || "",
+                  node.getAttribute("href") || ""
+                ].join(" ");
+                return visible(node) && terms.test(text);
+              });
+              if (!target) return {clicked: false, label: ""};
+              return {
+                clicked: false,
+                index: candidates.indexOf(target),
+                label: (target.innerText || target.getAttribute("aria-label") || "download").trim().slice(0, 120)
+              };
+            })()
+        """
+        result = self.cdp.command(
+            "Runtime.evaluate",
+            {"expression": find_script, "returnByValue": True},
+        )
+        value = result.get("result", {}).get("result", {}).get("value")
+        if not isinstance(value, dict) or "index" not in value:
+            return {"clicked": False, "label": ""}
+        index = int(value["index"])
+        click_script = f"""
+            (() => {{
+              const candidates = [...document.querySelectorAll(
+                "a, button, [role='button'], input[type='button'], input[type='submit']"
+              )];
+              const target = candidates[{index}];
+              if (!target) return false;
+              target.scrollIntoView({{block: "center", inline: "center"}});
+              window.setTimeout(() => target.click(), 0);
+              return true;
+            }})()
+        """
+        try:
+            clicked = self.cdp.command(
+                "Runtime.evaluate",
+                {"expression": click_script, "returnByValue": True},
+            )
+            did_click = clicked.get("result", {}).get("result", {}).get("value") is True
+        except (ConnectionError, OSError, ValueError, TimeoutError):
+            did_click = True
+        time.sleep(0.25)
+        return {"clicked": did_click, "label": str(value.get("label") or "download")}
 
     def snapshot(self) -> dict[str, object]:
         with self.lock:
@@ -787,6 +874,7 @@ class UptodownBrowserSession:
             "title": self.title,
             "url": self.current_url,
             "image": image,
+            "viewport": self.viewport(),
             "savedApp": saved_app,
             "error": error,
         }
@@ -1131,6 +1219,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/uptodown/browser/") and path.endswith("/click"):
             self.click_browser_session(path)
             return
+        if path.startswith("/api/uptodown/browser/") and path.endswith("/auto"):
+            self.auto_browser_session(path)
+            return
         if path != "/api/jobs":
             self.send_error_json("route not found", HTTPStatus.NOT_FOUND)
             return
@@ -1188,10 +1279,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             x = float(payload.get("x", -1))
             y = float(payload.get("y", -1))
-            if not 0 <= x <= 1280 or not 0 <= y <= 900:
-                raise ValueError("browser click is outside the remote browser viewport")
-            session.click(x, y)
+            image_width = float(payload.get("imageWidth", 0))
+            image_height = float(payload.get("imageHeight", 0))
+            if not 0 <= x <= image_width or not 0 <= y <= image_height:
+                raise ValueError("browser click is outside the remote browser screenshot")
+            session.click(x, y, image_width, image_height)
             self.send_json(session.snapshot())
+        except (ValueError, OSError, TimeoutError, ConnectionError) as exc:
+            self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
+
+    def auto_browser_session(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 5 or not SAVED_APP_ID_RE.match(parts[3]):
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        with BROWSER_SESSIONS_LOCK:
+            session = BROWSER_SESSIONS.get(parts[3])
+        if session is None:
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        try:
+            automation = session.auto_click_download()
+            response = session.snapshot()
+            response["automation"] = automation
+            self.send_json(response)
         except (ValueError, OSError, TimeoutError, ConnectionError) as exc:
             self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
 

@@ -32,6 +32,7 @@ const remoteBrowser = document.querySelector("#remote-browser");
 const browserImage = document.querySelector("#browser-image");
 const browserPlaceholder = document.querySelector("#browser-placeholder");
 const browserStatus = document.querySelector("#browser-status");
+const browserAuto = document.querySelector("#browser-auto");
 const browserRefresh = document.querySelector("#browser-refresh");
 const browserClose = document.querySelector("#browser-close");
 const uptodownAppUrl = document.querySelector("#uptodown-app-url");
@@ -42,6 +43,7 @@ let pollTimer = null;
 let browserPollTimer = null;
 let browserSessionId = null;
 let savedApps = [];
+let browserAutoAttempted = false;
 
 function formatBytes(bytes) {
   if (!bytes) return "";
@@ -221,6 +223,7 @@ async function openRemoteBrowser() {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not open the server browser");
     browserSessionId = result.id;
+    browserAutoAttempted = false;
     renderBrowserSnapshot(result);
     pollBrowser(result.id);
   } catch (error) {
@@ -260,8 +263,13 @@ async function pollBrowser(sessionId) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not read remote browser");
     renderBrowserSnapshot(result);
+    if (result.status === "ready" && !browserAutoAttempted) {
+      browserAutoAttempted = true;
+      autoFindDownload();
+      return;
+    }
     if (result.status === "starting" || result.status === "ready") {
-      browserPollTimer = window.setTimeout(() => pollBrowser(sessionId), 1400);
+      browserPollTimer = window.setTimeout(() => pollBrowser(sessionId), 350);
     }
   } catch (error) {
     browserStatus.textContent = "Browser disconnected";
@@ -269,22 +277,64 @@ async function pollBrowser(sessionId) {
   }
 }
 
+async function autoFindDownload() {
+  if (!browserSessionId) return;
+  browserAuto.disabled = true;
+  browserStatus.textContent = "Looking for a download control…";
+  try {
+    const response = await fetch(`/api/uptodown/browser/${browserSessionId}/auto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not automate the remote browser");
+    renderBrowserSnapshot(result);
+    setStoreStatus(
+      result.automation?.clicked
+        ? `Clicked “${result.automation.label || "download"}”. Watching for the server file…`
+        : "No visible download control was found. Complete the browser check, then try again or click the page.",
+      result.automation?.clicked ? "success" : "warning",
+    );
+    if (browserSessionId) {
+      browserPollTimer = window.setTimeout(() => pollBrowser(browserSessionId), 150);
+    }
+  } catch (error) {
+    setStoreStatus(error.message, "error");
+  } finally {
+    browserAuto.disabled = false;
+  }
+}
+
 async function clickRemoteBrowser(event) {
-  if (!browserSessionId || !browserImage.src || browserPlaceholder.classList.contains("hidden") === false) return;
+  if (!browserSessionId || !browserImage.complete || !browserImage.naturalWidth) return;
   const bounds = browserImage.getBoundingClientRect();
   if (!bounds.width || !bounds.height) return;
-  const x = (event.clientX - bounds.left) * 1280 / bounds.width;
-  const y = (event.clientY - bounds.top) * 900 / bounds.height;
+  const x = Math.max(
+    0,
+    Math.min(browserImage.naturalWidth, (event.clientX - bounds.left) * browserImage.naturalWidth / bounds.width),
+  );
+  const y = Math.max(
+    0,
+    Math.min(browserImage.naturalHeight, (event.clientY - bounds.top) * browserImage.naturalHeight / bounds.height),
+  );
   try {
     const response = await fetch(`/api/uptodown/browser/${browserSessionId}/click`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ x, y }),
+      body: JSON.stringify({
+        x,
+        y,
+        imageWidth: browserImage.naturalWidth,
+        imageHeight: browserImage.naturalHeight,
+      }),
     });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Could not click the remote browser");
     renderBrowserSnapshot(result);
-    browserPollTimer = window.setTimeout(() => pollBrowser(browserSessionId), 1000);
+    if (browserSessionId) {
+      browserPollTimer = window.setTimeout(() => pollBrowser(browserSessionId), 150);
+    }
   } catch (error) {
     setStoreStatus(error.message, "error");
   }
@@ -390,6 +440,7 @@ clearUrl.addEventListener("click", () => {
 });
 storeSearchButton.addEventListener("click", searchStore);
 openBrowserButton.addEventListener("click", openRemoteBrowser);
+browserAuto.addEventListener("click", autoFindDownload);
 browserImage.addEventListener("click", clickRemoteBrowser);
 browserRefresh.addEventListener("click", () => {
   if (browserSessionId) pollBrowser(browserSessionId);
