@@ -25,6 +25,11 @@ provides:
 
 - Uptodown app search with selectable app cards and server-side APK link
   resolution when Uptodown exposes a direct file.
+- A server-side Chromium browser for interactive Uptodown downloads. The
+  dashboard shows the browser view, forwards clicks to it, and saves a
+  completed APK under `.dashboard/saved-apps/`.
+- A saved-app selector so an APK downloaded once on the server can be reused
+  for later builds without downloading or uploading it again.
 - Local APK upload or a public direct APK URL.
 - Automatic `MAIN` / `LAUNCHER` activity selection, plus an optional component
   field for choosing a specific activity or alias.
@@ -33,14 +38,14 @@ provides:
 - Live build logs and a download button when the patched APK is ready.
 
 Builds run one at a time and APK files remain in the workspace. Selecting an
-Uptodown result resolves and downloads the APK into the job directory when a
-direct file is available, then the dashboard invokes the same `build.sh`
-pipeline used by the CLI. The server does not accept keystores or signing
-passwords. Uptodown metadata can be loaded through a translated proxy when
-the direct catalog returns HTTP 410. Its current download page uses a
-Cloudflare Turnstile challenge and may not expose a server-downloadable APK;
-in that case the dashboard explains the limitation and the app can be
-downloaded in a browser and uploaded through the normal local APK flow.
+Uptodown result opens a server-side Chromium session. Complete any
+Cloudflare/Turnstile check and click the download control in the embedded
+browser view; the resulting APK is detected and copied into the server's
+saved-app directory. Select it from **Saved on server** to invoke the same
+`build.sh` pipeline without a device download or re-upload. Direct APK URLs
+remain supported. The server does not accept keystores or signing passwords.
+Uptodown metadata can be loaded through a translated proxy when the direct
+catalog returns HTTP 410.
 
 ## CLI quick start
 

@@ -1,2 +1,3 @@
 - [Android APK patcher bootstrap](android-apk-patcher.md) — sdkmanager needs the bootstrapped JDK on PATH; pipefail makes yes exit 141 after licenses finish.
+- [Chromium remote downloads](remote-browser.md) — CDP page commands require a page target socket, and completed downloads need a stable-size debounce before processing.
 - [Uptodown availability](uptodown-availability.md) — Uptodown catalog and app domains returned HTTP 410 during integration testing; keep the store adapter failure-explicit.

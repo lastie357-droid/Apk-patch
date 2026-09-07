@@ -85,6 +85,7 @@ h1 em { color: var(--lime); font-style: normal; }
 .store-search button { color: #11150f; background: var(--lime); border: 0; border-radius: 4px; cursor: pointer; margin-right: 4px; padding: 8px 13px; font-size: 11px; font-weight: 700; }
 .store-search button:hover { background: #e6ff8c; }.store-search button:disabled { cursor: wait; opacity: .6; }
 .store-browser > .field-hint { margin-bottom: 0; }
+.saved-apps-row { margin-top: 15px; }.saved-apps-row .field-label { margin-bottom: 6px; }
 .store-status { color: var(--muted); min-height: 18px; margin-top: 12px; font: 10px "DM Mono", monospace; }
 .store-status.error { color: var(--danger); }.store-status.success { color: var(--cyan); }.store-status.warning { color: #e2c96d; }
 .store-results { display: grid; gap: 7px; margin-top: 2px; }
@@ -98,6 +99,13 @@ h1 em { color: var(--lime); font-style: normal; }
 .store-result-arrow { color: var(--lime); margin-left: auto; font-size: 17px; }
 .store-selection { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 9px; border: 1px solid #8de5d238; border-radius: 5px; background: #16221b; }
 .store-selection-copy { flex: 1; }.store-clear { color: var(--lime); background: transparent; border: 0; cursor: pointer; font-size: 10px; font-weight: 700; }.store-clear:hover { color: var(--text); }
+.store-open { color: #11150f; background: var(--lime); border: 0; border-radius: 4px; cursor: pointer; padding: 7px 9px; font-size: 10px; font-weight: 700; white-space: nowrap; }.store-open:hover { background: #e6ff8c; }.store-open:disabled { cursor: wait; opacity: .6; }
+.remote-browser { margin-top: 12px; padding: 10px; border: 1px solid #8de5d238; border-radius: 6px; background: #101714; }
+.remote-browser-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }.remote-browser-heading strong { display: block; font-size: 11px; }.remote-browser-heading small { display: block; color: var(--muted); font: 9px "DM Mono", monospace; margin-top: 3px; }
+.remote-browser-stage { position: relative; min-height: 190px; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: #0c100e; cursor: crosshair; }
+.remote-browser-stage img { display: block; width: 100%; height: auto; min-height: 190px; object-fit: contain; object-position: top left; }
+.browser-placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); padding: 22px; text-align: center; font: 10px "DM Mono", monospace; }
+.remote-browser-actions { display: flex; align-items: center; gap: 10px; margin-top: 9px; }.remote-browser-actions span { flex: 1; color: var(--dim); font-size: 9px; line-height: 1.45; }.remote-browser-actions .store-open { flex: none; }
 .dropzone { min-height: 141px; display: flex; align-items: center; gap: 15px; position: relative; border: 1px dashed #50605a; border-radius: 7px; padding: 23px 20px; cursor: pointer; background: #171d1b; transition: .2s ease; }
 .dropzone:hover, .dropzone.dragging { border-color: var(--lime); background: #1b251e; }
 .dropzone input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }

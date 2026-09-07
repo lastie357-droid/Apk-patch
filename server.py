@@ -16,6 +16,7 @@ import re
 import base64
 import shutil
 import socket
+import struct
 import subprocess
 import tempfile
 import threading
@@ -44,6 +45,7 @@ MAX_REQUEST_BYTES = MAX_APK_BYTES + 2 * 1024 * 1024
 ALLOWED_LAUNCH_MODES = {"standard", "singleTop", "singleTask", "singleInstance"}
 ALLOWED_SIGNING_MODES = {"debug", "test"}
 JOB_ID_RE = re.compile(r"^[a-f0-9-]{36}$")
+SAVED_APP_ID_RE = JOB_ID_RE
 UPTODOWN_SEARCH_URLS = (
     os.environ.get("UPTODOWN_SEARCH_URL", "https://en.uptodown.com/android/search?query={query}"),
     "https://www.uptodown.com/android/search?query={query}",
@@ -54,6 +56,12 @@ UPTODOWN_HOST_SUFFIX = ".uptodown.com"
 BUILD_LOCK = threading.Semaphore(1)
 JOBS: dict[str, "BuildJob"] = {}
 JOBS_LOCK = threading.RLock()
+SAVED_APPS_ROOT = ROOT / ".dashboard" / "saved-apps"
+SAVED_APPS_INDEX = ROOT / ".dashboard" / "saved-apps.json"
+SAVED_APPS_LOCK = threading.RLock()
+CHROMIUM_BINARY = os.environ.get("CHROMIUM_BINARY") or shutil.which("chromium") or "/repl/tools/bin/chromium"
+BROWSER_SESSIONS: dict[str, "UptodownBrowserSession"] = {}
+BROWSER_SESSIONS_LOCK = threading.RLock()
 UPTODOWN_PAGE_CACHE: dict[str, tuple[float, str, str]] = {}
 UPTODOWN_CACHE_LOCK = threading.RLock()
 UPTODOWN_CACHE_SECONDS = 300
@@ -454,6 +462,349 @@ def download_url(url: str, destination: Path) -> tuple[str, int]:
     return Path(urllib.parse.unquote(parsed.path)).name or "download.apk", total
 
 
+def free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def read_saved_apps() -> list[dict[str, object]]:
+    with SAVED_APPS_LOCK:
+        if not SAVED_APPS_INDEX.exists():
+            return []
+        try:
+            value = json.loads(SAVED_APPS_INDEX.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict) and item.get("id")]
+
+
+def write_saved_apps(apps: list[dict[str, object]]) -> None:
+    SAVED_APPS_ROOT.mkdir(parents=True, exist_ok=True)
+    temporary = SAVED_APPS_INDEX.with_suffix(".tmp")
+    temporary.write_text(json.dumps(apps, indent=2), encoding="utf-8")
+    temporary.replace(SAVED_APPS_INDEX)
+
+
+def saved_app_by_id(app_id: str) -> dict[str, object] | None:
+    if not SAVED_APP_ID_RE.match(app_id):
+        return None
+    for app in read_saved_apps():
+        if app.get("id") == app_id:
+            file_name = str(app.get("fileName") or "")
+            path = SAVED_APPS_ROOT / file_name
+            try:
+                path.resolve().relative_to(SAVED_APPS_ROOT.resolve())
+            except ValueError:
+                return None
+            if path.is_file():
+                return {**app, "path": path}
+    return None
+
+
+def save_downloaded_app(session: "UptodownBrowserSession", source: Path) -> dict[str, object]:
+    app_id = str(uuid.uuid4())
+    file_name = safe_name(f"{session.title}-{source.name}")
+    destination = SAVED_APPS_ROOT / f"{app_id}-{file_name}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, destination)
+    record = {
+        "id": app_id,
+        "title": session.title[:160] or source.stem,
+        "sourceUrl": session.app_url,
+        "fileName": destination.name,
+        "size": destination.stat().st_size,
+        "createdAt": now_iso(),
+    }
+    with SAVED_APPS_LOCK:
+        apps = read_saved_apps()
+        apps.insert(0, record)
+        write_saved_apps(apps[:50])
+    return record
+
+
+class DevToolsSocket:
+    """Tiny standard-library WebSocket client for Chromium's CDP endpoint."""
+
+    def __init__(self, websocket_url: str) -> None:
+        parsed = urllib.parse.urlparse(websocket_url)
+        if parsed.scheme != "ws" or not parsed.hostname or not parsed.port:
+            raise ValueError("Chromium returned an invalid debugging endpoint")
+        self.socket = socket.create_connection((parsed.hostname, parsed.port), timeout=10)
+        key = base64.b64encode(os.urandom(16)).decode("ascii")
+        request = (
+            f"GET {parsed.path or '/'} HTTP/1.1\r\n"
+            f"Host: {parsed.hostname}:{parsed.port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode("ascii")
+        self.socket.sendall(request)
+        response = self._read_until(b"\r\n\r\n")
+        if b" 101 " not in response.split(b"\r\n", 1)[0]:
+            self.socket.close()
+            raise ValueError("Chromium debugging WebSocket handshake failed")
+        self.lock = threading.RLock()
+        self.command_id = 0
+
+    def _read_until(self, marker: bytes) -> bytes:
+        payload = bytearray()
+        while marker not in payload:
+            chunk = self.socket.recv(4096)
+            if not chunk:
+                raise ConnectionError("Chromium debugging connection closed")
+            payload.extend(chunk)
+        return bytes(payload)
+
+    def _receive_exact(self, size: int) -> bytes:
+        payload = bytearray()
+        while len(payload) < size:
+            chunk = self.socket.recv(size - len(payload))
+            if not chunk:
+                raise ConnectionError("Chromium debugging connection closed")
+            payload.extend(chunk)
+        return bytes(payload)
+
+    def _send_frame(self, opcode: int, payload: bytes) -> None:
+        length = len(payload)
+        if length < 126:
+            header = bytes([0x80 | opcode, 0x80 | length])
+        elif length <= 0xFFFF:
+            header = bytes([0x80 | opcode, 0x80 | 126]) + struct.pack("!H", length)
+        else:
+            header = bytes([0x80 | opcode, 0x80 | 127]) + struct.pack("!Q", length)
+        mask = os.urandom(4)
+        masked = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        self.socket.sendall(header + mask + masked)
+
+    def _receive_frame(self) -> tuple[int, bytes]:
+        first, second = self._receive_exact(2)
+        opcode = first & 0x0F
+        length = second & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", self._receive_exact(2))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self._receive_exact(8))[0]
+        mask = self._receive_exact(4) if second & 0x80 else b""
+        payload = self._receive_exact(length)
+        if mask:
+            payload = bytes(value ^ mask[index % 4] for index, value in enumerate(payload))
+        return opcode, payload
+
+    def command(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        with self.lock:
+            self.command_id += 1
+            command_id = self.command_id
+            payload = json.dumps(
+                {"id": command_id, "method": method, "params": params or {}},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self._send_frame(1, payload)
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                self.socket.settimeout(max(0.1, deadline - time.time()))
+                opcode, response = self._receive_frame()
+                if opcode == 9:
+                    self._send_frame(10, response)
+                    continue
+                if opcode == 8:
+                    raise ConnectionError("Chromium debugging connection closed")
+                if opcode != 1:
+                    continue
+                message = json.loads(response.decode("utf-8"))
+                if message.get("id") != command_id:
+                    continue
+                if "error" in message:
+                    raise ValueError(str(message["error"].get("message", "Chromium command failed")))
+                return message.get("result", {})
+            raise TimeoutError(f"Chromium command timed out: {method}")
+
+    def close(self) -> None:
+        try:
+            self.socket.close()
+        except OSError:
+            pass
+
+
+class UptodownBrowserSession:
+    def __init__(self, session_id: str, app_url: str, title: str) -> None:
+        self.id = session_id
+        self.app_url = app_url
+        self.title = title or "Uptodown app"
+        self.directory = ROOT / ".dashboard" / "browser" / session_id
+        self.download_directory = self.directory / "downloads"
+        self.process: subprocess.Popen[bytes] | None = None
+        self.cdp: DevToolsSocket | None = None
+        self.lock = threading.RLock()
+        self.status = "starting"
+        self.error: str | None = None
+        self.current_url = app_url
+        self.saved_app: dict[str, object] | None = None
+        self._candidate_sizes: dict[Path, tuple[int, float]] = {}
+        self._monitor_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if not Path(CHROMIUM_BINARY).is_file() and not shutil.which(CHROMIUM_BINARY):
+            raise ValueError("The server-side Chromium browser is not available")
+        self.download_directory.mkdir(parents=True, exist_ok=True)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        port = free_tcp_port()
+        self.process = subprocess.Popen(
+            [
+                CHROMIUM_BINARY,
+                "--headless=new",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--window-size=1280,900",
+                f"--remote-debugging-address=127.0.0.1",
+                f"--remote-debugging-port={port}",
+                f"--user-data-dir={self.directory / 'profile'}",
+                self.app_url,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        version_url = f"http://127.0.0.1:{port}/json/version"
+        targets_url = f"http://127.0.0.1:{port}/json/list"
+        deadline = time.time() + 15
+        websocket_url = ""
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(version_url, timeout=1):
+                    pass
+                with urllib.request.urlopen(targets_url, timeout=1) as response:
+                    targets = json.loads(response.read().decode("utf-8"))
+                page = next(
+                    (
+                        target
+                        for target in targets
+                        if target.get("type") == "page" and target.get("webSocketDebuggerUrl")
+                    ),
+                    None,
+                )
+                if page:
+                    websocket_url = str(page["webSocketDebuggerUrl"])
+                    break
+            except (OSError, ValueError, urllib.error.URLError):
+                time.sleep(0.15)
+        if not websocket_url:
+            self.stop()
+            raise ValueError("Chromium did not open its remote browser session")
+        self.cdp = DevToolsSocket(websocket_url)
+        self.cdp.command("Page.enable")
+        try:
+            self.cdp.command(
+                "Browser.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": str(self.download_directory)},
+            )
+        except (ConnectionError, ValueError, TimeoutError):
+            self.cdp.command(
+                "Page.setDownloadBehavior",
+                {"behavior": "allow", "downloadPath": str(self.download_directory)},
+            )
+        with self.lock:
+            self.status = "ready"
+        self._monitor_thread = threading.Thread(
+            target=self._monitor_downloads,
+            name=f"uptodown-browser-{self.id[:8]}",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+
+    def _monitor_downloads(self) -> None:
+        while self.process and self.process.poll() is None:
+            if self.saved_app is None:
+                for candidate in self.download_directory.glob("*.apk"):
+                    try:
+                        size = candidate.stat().st_size
+                    except OSError:
+                        continue
+                    previous = self._candidate_sizes.get(candidate)
+                    current_time = time.time()
+                    if not previous or previous[0] != size:
+                        self._candidate_sizes[candidate] = (size, current_time)
+                        continue
+                    if size > 4 and current_time - previous[1] >= 1:
+                        try:
+                            with candidate.open("rb") as source:
+                                if source.read(4) != b"PK\x03\x04":
+                                    continue
+                            self.saved_app = save_downloaded_app(self, candidate)
+                            with self.lock:
+                                self.status = "downloaded"
+                        except (OSError, ValueError) as exc:
+                            with self.lock:
+                                self.error = f"Could not save the downloaded APK: {exc}"
+                        break
+            time.sleep(0.5)
+
+    def click(self, x: float, y: float) -> None:
+        if not self.cdp:
+            raise ValueError("Remote browser is not ready")
+        width = max(0.0, min(1280.0, float(x)))
+        height = max(0.0, min(900.0, float(y)))
+        self.cdp.command(
+            "Input.dispatchMouseEvent",
+            {"type": "mousePressed", "x": width, "y": height, "button": "left", "clickCount": 1},
+        )
+        self.cdp.command(
+            "Input.dispatchMouseEvent",
+            {"type": "mouseReleased", "x": width, "y": height, "button": "left", "clickCount": 1},
+        )
+
+    def snapshot(self) -> dict[str, object]:
+        with self.lock:
+            status = self.status
+            error = self.error
+            saved_app = self.saved_app
+        image = ""
+        if self.cdp:
+            try:
+                result = self.cdp.command("Page.captureScreenshot", {"format": "jpeg", "quality": 72})
+                image = f"data:image/jpeg;base64,{result.get('data', '')}"
+                location = self.cdp.command(
+                    "Runtime.evaluate",
+                    {"expression": "window.location.href", "returnByValue": True},
+                )
+                current_url = location.get("result", {}).get("result", {}).get("value")
+                if current_url:
+                    self.current_url = str(current_url)
+            except (ConnectionError, OSError, ValueError, TimeoutError) as exc:
+                with self.lock:
+                    self.status = "error"
+                    self.error = str(exc)
+                    status = self.status
+                    error = self.error
+        return {
+            "id": self.id,
+            "status": status,
+            "title": self.title,
+            "url": self.current_url,
+            "image": image,
+            "savedApp": saved_app,
+            "error": error,
+        }
+
+    def stop(self) -> None:
+        if self.cdp:
+            self.cdp.close()
+            self.cdp = None
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+        self.process = None
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+
 class BuildJob:
     def __init__(
         self,
@@ -600,13 +951,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path == "/api/health":
-            self.send_json({"ok": True, "buildScript": BUILD_SCRIPT.exists()})
+            self.send_json(
+                {
+                    "ok": True,
+                    "buildScript": BUILD_SCRIPT.exists(),
+                    "chromium": Path(CHROMIUM_BINARY).is_file() or bool(shutil.which(CHROMIUM_BINARY)),
+                    "savedApps": len(read_saved_apps()),
+                }
+            )
             return
         if path == "/api/uptodown/search":
             self.handle_uptodown_search(parsed)
             return
         if path == "/api/uptodown/app":
             self.handle_uptodown_app(parsed)
+            return
+        if path == "/api/saved-apps":
+            self.send_json({"apps": read_saved_apps()})
+            return
+        if path.startswith("/api/uptodown/browser/"):
+            self.handle_browser_get(path)
             return
         if path == "/favicon.ico":
             favicon = (
@@ -703,6 +1067,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
 
+    def handle_browser_get(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 4 or not SAVED_APP_ID_RE.match(parts[3]):
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        with BROWSER_SESSIONS_LOCK:
+            session = BROWSER_SESSIONS.get(parts[3])
+        if session is None:
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        self.send_json(session.snapshot())
+
     def serve_file(self, path: Path, content_type: str) -> None:
         if not path.is_file():
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -748,7 +1124,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             shutil.copyfileobj(source, self.wfile)
 
     def do_POST(self) -> None:
-        if urllib.parse.urlparse(self.path).path != "/api/jobs":
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/api/uptodown/browser":
+            self.create_browser_session()
+            return
+        if path.startswith("/api/uptodown/browser/") and path.endswith("/click"):
+            self.click_browser_session(path)
+            return
+        if path != "/api/jobs":
             self.send_error_json("route not found", HTTPStatus.NOT_FOUND)
             return
         try:
@@ -758,6 +1141,76 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         start_job(job)
         self.send_json(job.snapshot(), HTTPStatus.ACCEPTED)
+
+    def read_json_body(self) -> dict[str, object]:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0 or content_length > 128 * 1024:
+            raise ValueError("request body is empty or too large")
+        try:
+            value = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError("request body must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError("request body must be a JSON object")
+        return value
+
+    def create_browser_session(self) -> None:
+        try:
+            payload = self.read_json_body()
+            app_url = normalize_uptodown_url(str(payload.get("url") or ""))
+            if not app_url:
+                raise ValueError("Choose an app from Uptodown search results")
+            title = str(payload.get("title") or "Uptodown app").strip()[:160]
+            session_id = str(uuid.uuid4())
+            session = UptodownBrowserSession(session_id, app_url, title)
+            session.start()
+            with BROWSER_SESSIONS_LOCK:
+                old_sessions = list(BROWSER_SESSIONS.values())
+                BROWSER_SESSIONS[session_id] = session
+            for old_session in old_sessions:
+                if old_session.id != session_id:
+                    old_session.stop()
+            self.send_json(session.snapshot(), HTTPStatus.ACCEPTED)
+        except (ValueError, OSError, TimeoutError, ConnectionError) as exc:
+            self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
+
+    def click_browser_session(self, path: str) -> None:
+        parts = path.strip("/").split("/")
+        if len(parts) != 5 or not SAVED_APP_ID_RE.match(parts[3]):
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        with BROWSER_SESSIONS_LOCK:
+            session = BROWSER_SESSIONS.get(parts[3])
+        if session is None:
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        try:
+            payload = self.read_json_body()
+            x = float(payload.get("x", -1))
+            y = float(payload.get("y", -1))
+            if not 0 <= x <= 1280 or not 0 <= y <= 900:
+                raise ValueError("browser click is outside the remote browser viewport")
+            session.click(x, y)
+            self.send_json(session.snapshot())
+        except (ValueError, OSError, TimeoutError, ConnectionError) as exc:
+            self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
+
+    def do_DELETE(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        if not path.startswith("/api/uptodown/browser/"):
+            self.send_error_json("route not found", HTTPStatus.NOT_FOUND)
+            return
+        parts = path.strip("/").split("/")
+        if len(parts) != 4 or not SAVED_APP_ID_RE.match(parts[3]):
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        with BROWSER_SESSIONS_LOCK:
+            session = BROWSER_SESSIONS.pop(parts[3], None)
+        if session is None:
+            self.send_error_json("remote browser session not found", HTTPStatus.NOT_FOUND)
+            return
+        session.stop()
+        self.send_json({"ok": True})
 
     def create_job(self) -> BuildJob:
         content_type = self.headers.get("Content-Type", "")
@@ -792,13 +1245,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         signing_mode = fields.get("signing_mode", "debug")
         apk_url = fields.get("apk_url", "")
         uptodown_app_url = fields.get("uptodown_app_url", "")
+        saved_app_id = fields.get("saved_app_id", "")
         if launch_mode not in ALLOWED_LAUNCH_MODES:
             raise ValueError("unsupported launch mode")
         if signing_mode not in ALLOWED_SIGNING_MODES:
             raise ValueError("unsupported signing mode")
         if uptodown_app_url and not is_uptodown_url(uptodown_app_url):
             raise ValueError("Uptodown app URL is invalid")
-        if not upload and not apk_url and not uptodown_app_url:
+        saved_app = saved_app_by_id(saved_app_id) if saved_app_id else None
+        if saved_app_id and not saved_app:
+            raise ValueError("The selected saved app is no longer available")
+        if not upload and not apk_url and not uptodown_app_url and not saved_app:
             raise ValueError("choose an APK file or paste an APK URL")
         if upload and len(upload) > MAX_APK_BYTES:
             raise ValueError("APK is larger than the 650 MB upload limit")
@@ -809,7 +1266,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         job = BuildJob(
             job_id,
             directory,
-            upload_name if upload else (fields.get("source_name") or apk_url or "uptodown-app.apk"),
+            upload_name
+            if upload
+            else (
+                str(saved_app.get("fileName") or "saved-app.apk")
+                if saved_app
+                else (fields.get("source_name") or apk_url or "uptodown-app.apk")
+            ),
             component,
             launch_mode,
             signing_mode,
@@ -817,6 +1280,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if upload:
             job.input_path.write_bytes(upload)
             job.log(f"Received upload: {upload_name} ({len(upload) / 1024 / 1024:.1f} MB)")
+        elif saved_app:
+            saved_path = saved_app["path"]
+            assert isinstance(saved_path, Path)
+            shutil.copy2(saved_path, job.input_path)
+            job.source_name = safe_name(str(saved_app.get("fileName") or "saved-app.apk"))
+            job.log(f"Using saved server APK: {job.source_name} ({job.input_path.stat().st_size / 1024 / 1024:.1f} MB)")
         else:
             if uptodown_app_url:
                 job.log(f"Resolving APK from Uptodown: {uptodown_app_url}")

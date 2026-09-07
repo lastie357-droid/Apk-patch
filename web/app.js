@@ -25,11 +25,23 @@ const storeSelectionIcon = document.querySelector("#store-selection-icon");
 const storeSelectionTitle = document.querySelector("#store-selection-title");
 const storeSelectionDetail = document.querySelector("#store-selection-detail");
 const storeClear = document.querySelector("#store-clear");
+const openBrowserButton = document.querySelector("#open-browser-button");
+const savedAppSelect = document.querySelector("#saved-app-select");
+const savedAppId = document.querySelector("#saved-app-id");
+const remoteBrowser = document.querySelector("#remote-browser");
+const browserImage = document.querySelector("#browser-image");
+const browserPlaceholder = document.querySelector("#browser-placeholder");
+const browserStatus = document.querySelector("#browser-status");
+const browserRefresh = document.querySelector("#browser-refresh");
+const browserClose = document.querySelector("#browser-close");
 const uptodownAppUrl = document.querySelector("#uptodown-app-url");
 const sourceName = document.querySelector("#source-name");
 
 let activeJob = null;
 let pollTimer = null;
+let browserPollTimer = null;
+let browserSessionId = null;
+let savedApps = [];
 
 function formatBytes(bytes) {
   if (!bytes) return "";
@@ -75,11 +87,63 @@ function renderStoreIcon(container, iconUrl, fallback = "APK") {
 }
 
 function clearStoreSelection() {
+  stopRemoteBrowser();
   uptodownAppUrl.value = "";
   sourceName.value = "";
+  savedAppId.value = "";
+  savedAppSelect.value = "";
   storeSelection.classList.add("hidden");
+  remoteBrowser.classList.add("hidden");
+  browserImage.removeAttribute("src");
+  browserPlaceholder.textContent = "Starting Chromium on the server…";
+  browserPlaceholder.classList.remove("hidden");
   renderStoreIcon(storeSelectionIcon, "", "APK");
   setStoreStatus("");
+}
+
+function renderSavedApps() {
+  const selected = savedAppId.value;
+  savedAppSelect.replaceChildren();
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = savedApps.length ? "Select a downloaded app" : "No apps saved yet";
+  savedAppSelect.append(empty);
+  savedApps.forEach((app) => {
+    const option = document.createElement("option");
+    option.value = app.id;
+    option.textContent = `${app.title} · ${formatBytes(app.size)}`;
+    savedAppSelect.append(option);
+  });
+  savedAppSelect.value = selected;
+}
+
+async function loadSavedApps() {
+  try {
+    const response = await fetch("/api/saved-apps", { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not load saved apps");
+    savedApps = result.apps || [];
+    renderSavedApps();
+  } catch (error) {
+    setStoreStatus(error.message, "error");
+  }
+}
+
+function selectSavedApp(app) {
+  stopRemoteBrowser();
+  fileInput.value = "";
+  urlInput.value = "";
+  savedAppId.value = app.id;
+  uptodownAppUrl.value = app.sourceUrl || "";
+  sourceName.value = app.fileName || app.title;
+  savedAppSelect.value = app.id;
+  storeSelection.classList.remove("hidden");
+  remoteBrowser.classList.add("hidden");
+  storeSelectionTitle.textContent = app.title;
+  storeSelectionDetail.textContent = `Saved on server · ${formatBytes(app.size)} · ready to build`;
+  openBrowserButton.textContent = "Open again";
+  renderStoreIcon(storeSelectionIcon, "", "APK");
+  setStoreStatus("Saved server APK selected. Start the build when ready.", "success");
 }
 
 function renderStoreResults(results) {
@@ -126,39 +190,112 @@ async function searchStore() {
   }
 }
 
-async function selectStoreApp(app) {
-  storeSearchButton.disabled = true;
-  setStoreStatus(`Resolving ${app.title} APK…`);
+function selectStoreApp(app) {
+  clearStoreSelection();
+  fileInput.value = "";
+  urlInput.value = "";
+  uptodownAppUrl.value = app.url;
+  sourceName.value = app.title;
+  storeSelection.classList.remove("hidden");
+  storeSelectionTitle.textContent = app.title;
+  storeSelectionDetail.textContent = "Open the server browser to download this app";
+  openBrowserButton.textContent = "Open";
+  renderStoreIcon(storeSelectionIcon, app.icon, "APK");
+  setStoreStatus("App selected. Open the server browser to continue.", "warning");
+  storeResults.replaceChildren();
+}
+
+async function openRemoteBrowser() {
+  if (!uptodownAppUrl.value) return;
+  openBrowserButton.disabled = true;
+  remoteBrowser.classList.remove("hidden");
+  browserPlaceholder.classList.remove("hidden");
+  browserPlaceholder.textContent = "Starting Chromium on the server…";
+  setStoreStatus("Opening the server browser…");
   try {
-    let result = app.downloadRequiresBrowser ? app : null;
-    if (!result) {
-      const response = await fetch(`/api/uptodown/app?url=${encodeURIComponent(app.url)}`, { cache: "no-store" });
-      result = await response.json();
-      if (!response.ok) throw new Error(result.error || "Could not load this Uptodown app");
-    }
-    fileInput.value = "";
-    setSelectedFile(null);
-    uptodownAppUrl.value = result.url;
-    sourceName.value = result.title;
-    urlInput.value = result.apkUrl || "";
-    storeSelection.classList.remove("hidden");
-    storeSelectionTitle.textContent = result.title;
-    storeSelectionDetail.textContent = result.apkUrl
-      ? "Uptodown APK resolved · ready to build"
-      : "Browser download required before building";
-    renderStoreIcon(storeSelectionIcon, result.icon, "APK");
-    setStoreStatus(
-      result.apkUrl
-        ? "Store source selected. Start the build when ready."
-        : "Uptodown requires an interactive browser challenge for this APK. Open the app page, download the APK, then upload it here.",
-      result.apkUrl ? "success" : "warning",
-    );
-    storeResults.replaceChildren();
+    const response = await fetch("/api/uptodown/browser", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: uptodownAppUrl.value, title: sourceName.value }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not open the server browser");
+    browserSessionId = result.id;
+    renderBrowserSnapshot(result);
+    pollBrowser(result.id);
   } catch (error) {
+    browserPlaceholder.textContent = error.message;
     setStoreStatus(error.message, "error");
   } finally {
-    storeSearchButton.disabled = false;
+    openBrowserButton.disabled = false;
   }
+}
+
+function renderBrowserSnapshot(snapshot) {
+  if (snapshot.image) {
+    browserImage.src = snapshot.image;
+    browserPlaceholder.classList.add("hidden");
+  }
+  browserStatus.textContent = snapshot.status === "downloaded"
+    ? "APK saved on server"
+    : snapshot.status === "error"
+      ? "Browser error"
+      : "Interactive · click the page to continue";
+  if (snapshot.savedApp) {
+    const saved = snapshot.savedApp;
+    if (!savedApps.some((app) => app.id === saved.id)) savedApps.unshift(saved);
+    renderSavedApps();
+    selectSavedApp(saved);
+    remoteBrowser.classList.remove("hidden");
+    setStoreStatus("APK downloaded and saved on the server. It is selected for this build.", "success");
+  } else if (snapshot.status === "ready") {
+    setStoreStatus("Server browser ready. Click the Uptodown download button in the view above.", "warning");
+  }
+}
+
+async function pollBrowser(sessionId) {
+  window.clearTimeout(browserPollTimer);
+  try {
+    const response = await fetch(`/api/uptodown/browser/${sessionId}`, { cache: "no-store" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not read remote browser");
+    renderBrowserSnapshot(result);
+    if (result.status === "starting" || result.status === "ready") {
+      browserPollTimer = window.setTimeout(() => pollBrowser(sessionId), 1400);
+    }
+  } catch (error) {
+    browserStatus.textContent = "Browser disconnected";
+    setStoreStatus(error.message, "error");
+  }
+}
+
+async function clickRemoteBrowser(event) {
+  if (!browserSessionId || !browserImage.src || browserPlaceholder.classList.contains("hidden") === false) return;
+  const bounds = browserImage.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const x = (event.clientX - bounds.left) * 1280 / bounds.width;
+  const y = (event.clientY - bounds.top) * 900 / bounds.height;
+  try {
+    const response = await fetch(`/api/uptodown/browser/${browserSessionId}/click`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x, y }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not click the remote browser");
+    renderBrowserSnapshot(result);
+    browserPollTimer = window.setTimeout(() => pollBrowser(browserSessionId), 1000);
+  } catch (error) {
+    setStoreStatus(error.message, "error");
+  }
+}
+
+function stopRemoteBrowser() {
+  window.clearTimeout(browserPollTimer);
+  if (!browserSessionId) return;
+  const sessionId = browserSessionId;
+  browserSessionId = null;
+  fetch(`/api/uptodown/browser/${sessionId}`, { method: "DELETE", keepalive: true }).catch(() => {});
 }
 
 function setStatus(status, label) {
@@ -252,6 +389,20 @@ clearUrl.addEventListener("click", () => {
   urlInput.focus();
 });
 storeSearchButton.addEventListener("click", searchStore);
+openBrowserButton.addEventListener("click", openRemoteBrowser);
+browserImage.addEventListener("click", clickRemoteBrowser);
+browserRefresh.addEventListener("click", () => {
+  if (browserSessionId) pollBrowser(browserSessionId);
+});
+browserClose.addEventListener("click", () => {
+  stopRemoteBrowser();
+  remoteBrowser.classList.add("hidden");
+});
+savedAppSelect.addEventListener("change", () => {
+  const app = savedApps.find((candidate) => candidate.id === savedAppSelect.value);
+  if (app) selectSavedApp(app);
+  else if (savedAppId.value) clearStoreSelection();
+});
 storeQuery.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -264,7 +415,7 @@ storeClear.addEventListener("click", () => {
   storeQuery.focus();
 });
 urlInput.addEventListener("input", () => {
-  if (urlInput.value.trim() && uptodownAppUrl.value) clearStoreSelection();
+  if (urlInput.value.trim() && (uptodownAppUrl.value || savedAppId.value)) clearStoreSelection();
 });
 document.querySelectorAll(".sign-option input").forEach((input) => input.addEventListener("change", () => {
   document.querySelectorAll(".sign-option").forEach((option) => option.classList.toggle("selected", option.querySelector("input").checked));
@@ -274,7 +425,7 @@ form.addEventListener("submit", async (event) => {
   event.preventDefault();
   if (activeJob) return;
   const file = fileInput.files[0];
-  if (!file && !urlInput.value.trim() && !uptodownAppUrl.value) {
+  if (!file && !urlInput.value.trim() && !uptodownAppUrl.value && !savedAppId.value) {
     setStatus("error", "Source needed");
     renderLogs(["ERROR: Choose an APK file, search Uptodown, or paste a public APK URL."]);
     document.querySelector("#dropzone").focus();
@@ -308,5 +459,10 @@ form.addEventListener("submit", async (event) => {
 
 fetch("/api/health", { cache: "no-store" })
   .then((response) => response.json())
-  .then((health) => { if (health.ok) healthLabel.textContent = "Toolchain standing by"; })
+  .then((health) => {
+    if (health.ok) {
+      healthLabel.textContent = health.chromium ? "Toolchain + browser standing by" : "Toolchain standing by";
+      loadSavedApps();
+    }
+  })
   .catch(() => { healthLabel.textContent = "Server needs attention"; });

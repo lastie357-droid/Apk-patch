@@ -67,7 +67,13 @@
                     <input id="store-query" type="search" autocomplete="off" placeholder="Search apps, for example Termux">
                     <button id="store-search-button" type="button">Search</button>
                   </div>
-                  <p class="field-hint">Choose a result to load its current Uptodown app page. Some downloads require an interactive browser check.</p>
+                  <div class="saved-apps-row">
+                    <label class="field-label" for="saved-app-select">SAVED ON SERVER <span>Reusable</span></label>
+                    <select class="text-input" id="saved-app-select">
+                      <option value="">Select a downloaded app</option>
+                    </select>
+                  </div>
+                  <p class="field-hint">Choose a result, open it in the server browser, and click its download button. The APK is saved here automatically.</p>
                   <div class="store-status" id="store-status" role="status" aria-live="polite"></div>
                   <div class="store-results" id="store-results"></div>
                   <div class="store-selection hidden" id="store-selection">
@@ -76,10 +82,26 @@
                       <strong id="store-selection-title">Selected app</strong>
                       <small id="store-selection-detail">Ready to use as the build source</small>
                     </div>
+                    <button class="store-open" id="open-browser-button" type="button">Open</button>
                     <button class="store-clear" id="store-clear" type="button">Change</button>
+                  </div>
+                  <div class="remote-browser hidden" id="remote-browser">
+                    <div class="remote-browser-heading">
+                      <div><strong>Server browser</strong><small id="browser-status">Loading Uptodown…</small></div>
+                      <button class="store-clear" id="browser-close" type="button">Close</button>
+                    </div>
+                    <div class="remote-browser-stage">
+                      <img id="browser-image" alt="Remote Chromium browser view">
+                      <div class="browser-placeholder" id="browser-placeholder">Starting Chromium on the server…</div>
+                    </div>
+                    <div class="remote-browser-actions">
+                      <span>Click the page above to complete any Cloudflare check and download the APK.</span>
+                      <button class="store-open" id="browser-refresh" type="button">Refresh view</button>
+                    </div>
                   </div>
                   <input id="uptodown-app-url" name="uptodown_app_url" type="hidden">
                   <input id="source-name" name="source_name" type="hidden">
+                  <input id="saved-app-id" name="saved_app_id" type="hidden">
                 </div>
                 <label class="dropzone" id="dropzone" for="apk-file">
                   <input id="apk-file" name="apk" type="file" accept=".apk,application/vnd.android.package-archive">
