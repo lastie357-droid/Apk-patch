@@ -25,6 +25,8 @@ import urllib.request
 import uuid
 from email import policy
 from email.parser import BytesParser
+from html import unescape
+from html.parser import HTMLParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +43,12 @@ MAX_REQUEST_BYTES = MAX_APK_BYTES + 2 * 1024 * 1024
 ALLOWED_LAUNCH_MODES = {"standard", "singleTop", "singleTask", "singleInstance"}
 ALLOWED_SIGNING_MODES = {"debug", "test"}
 JOB_ID_RE = re.compile(r"^[a-f0-9-]{36}$")
+UPTODOWN_SEARCH_URLS = (
+    os.environ.get("UPTODOWN_SEARCH_URL", "https://en.uptodown.com/android/search?query={query}"),
+    "https://www.uptodown.com/android/search?query={query}",
+)
+UPTODOWN_HOSTS = {"uptodown.com", "www.uptodown.com", "en.uptodown.com"}
+UPTODOWN_HOST_SUFFIX = ".uptodown.com"
 BUILD_LOCK = threading.Semaphore(1)
 JOBS: dict[str, "BuildJob"] = {}
 JOBS_LOCK = threading.RLock()
@@ -60,6 +68,209 @@ def safe_name(name: str) -> str:
     if not cleaned.lower().endswith(".apk"):
         cleaned += ".apk"
     return cleaned or "patched-app.apk"
+
+
+def is_uptodown_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return (
+        parsed.scheme in {"http", "https"}
+        and (hostname in UPTODOWN_HOSTS or hostname.endswith(UPTODOWN_HOST_SUFFIX))
+    )
+
+
+def normalize_uptodown_url(url: str, base_url: str = "https://en.uptodown.com/android") -> str | None:
+    candidate = urllib.parse.urljoin(base_url, unescape(url.strip()))
+    parsed = urllib.parse.urlparse(candidate)
+    if parsed.scheme == "http":
+        candidate = urllib.parse.urlunparse(parsed._replace(scheme="https"))
+    return candidate if is_uptodown_url(candidate) else None
+
+
+class UptodownHTMLParser(HTMLParser):
+    """Collect the small, stable subset of metadata used by the store adapter."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.metas: dict[str, str] = {}
+        self.links: list[dict[str, str]] = []
+        self.images: list[str] = []
+        self._anchor: dict[str, str] | None = None
+        self._anchor_text: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {key.lower(): value or "" for key, value in attrs}
+        if tag.lower() == "meta":
+            key = attributes.get("property") or attributes.get("name")
+            value = attributes.get("content")
+            if key and value:
+                self.metas[key.lower()] = value.strip()
+        elif tag.lower() == "img":
+            source = attributes.get("src") or attributes.get("data-src")
+            if source:
+                self.images.append(source.strip())
+        elif tag.lower() == "a" and attributes.get("href"):
+            self._anchor = {"href": attributes["href"], "title": attributes.get("title", "")}
+            self._anchor_text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor is not None:
+            self._anchor_text.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "a" and self._anchor is not None:
+            self._anchor["text"] = " ".join(" ".join(self._anchor_text).split())
+            self.links.append(self._anchor)
+            self._anchor = None
+            self._anchor_text = []
+
+
+def fetch_uptodown_page(url: str) -> tuple[str, str]:
+    if not is_uptodown_url(url):
+        raise ValueError("Uptodown URL is not valid")
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            final_url = response.geturl()
+            if not is_uptodown_url(final_url):
+                raise ValueError("Uptodown redirected to an unsupported host")
+            return final_url, response.read(2 * 1024 * 1024).decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise ValueError("Uptodown app page was not found") from exc
+        if exc.code == 410:
+            raise ValueError(
+                "Uptodown is not serving its catalog from this environment right now"
+            ) from exc
+        raise ValueError(f"Uptodown returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ValueError(f"could not reach Uptodown: {exc}") from exc
+
+
+def parse_uptodown_results(html: str, query: str) -> list[dict[str, str]]:
+    parser = UptodownHTMLParser()
+    parser.feed(html)
+    query_terms = [term for term in re.split(r"\s+", query.lower().strip()) if term]
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for link in parser.links:
+        url = normalize_uptodown_url(link.get("href", ""))
+        if not url or url in seen:
+            continue
+        parsed = urllib.parse.urlparse(url)
+        if parsed.hostname == "dw.uptodown.com":
+            continue
+        if "/android" not in parsed.path.lower() and not parsed.hostname.endswith(UPTODOWN_HOST_SUFFIX):
+            continue
+        title = unescape(link.get("title") or link.get("text") or "").strip()
+        if not title:
+            title = parsed.hostname.split(".")[0].replace("-", " ").title()
+        haystack = f"{title} {url}".lower()
+        if query_terms and not all(term in haystack for term in query_terms):
+            continue
+        seen.add(url)
+        results.append(
+            {
+                "id": url,
+                "title": title[:160],
+                "url": url,
+                "summary": "",
+                "icon": "",
+            }
+        )
+        if len(results) >= 24:
+            break
+    return results
+
+
+def guessed_uptodown_app_url(query: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")
+    return f"https://{slug}.en.uptodown.com/android"
+
+
+def find_uptodown_download_url(page_url: str, html: str) -> str | None:
+    parser = UptodownHTMLParser()
+    parser.feed(html)
+    candidates: list[tuple[int, str]] = []
+    for link in parser.links:
+        url = normalize_uptodown_url(link.get("href", ""), page_url)
+        if not url:
+            continue
+        parsed = urllib.parse.urlparse(url)
+        path = parsed.path.lower()
+        text = f"{link.get('text', '')} {link.get('title', '')}".lower()
+        if path.endswith(".apk") or parsed.hostname == "dw.uptodown.com":
+            score = 0
+        elif "/download" in path or "download" in text:
+            score = 10
+        else:
+            continue
+        candidates.append((score, url))
+
+    # Some Uptodown pages embed the signed download URL in JSON rather than an
+    # anchor, so cover that form without accepting arbitrary external URLs.
+    for match in re.findall(
+        r"""https?://[^"'\\\s<>]+(?:\.apk|dw\.uptodown\.com/[^"'\\\s<>]+)""",
+        html,
+        flags=re.IGNORECASE,
+    ):
+        url = normalize_uptodown_url(match.replace("\\/", "/"), page_url)
+        if url:
+            candidates.append((0, url))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], len(item[1])))
+    return candidates[0][1]
+
+
+def get_uptodown_app(url: str) -> dict[str, str]:
+    normalized = normalize_uptodown_url(url)
+    if not normalized:
+        raise ValueError("Choose an app from Uptodown search results")
+    final_url, html = fetch_uptodown_page(normalized)
+    parser = UptodownHTMLParser()
+    parser.feed(html)
+    download_url = find_uptodown_download_url(final_url, html) or ""
+    title = (
+        parser.metas.get("og:title")
+        or parser.metas.get("twitter:title")
+        or Path(urllib.parse.urlparse(final_url).path).stem.replace("-", " ").title()
+    )
+    description = (
+        parser.metas.get("description")
+        or parser.metas.get("og:description")
+        or ""
+    )
+    icon = ""
+    for image in parser.images:
+        normalized_image = normalize_uptodown_url(image, final_url)
+        if normalized_image:
+            icon = normalized_image
+            break
+    return {
+        "id": final_url,
+        "title": unescape(title).strip()[:160],
+        "url": final_url,
+        "summary": unescape(description).strip()[:300],
+        "icon": icon,
+        "apkUrl": download_url,
+    }
+
+
+def download_uptodown_app(app_url: str, destination: Path) -> tuple[str, int]:
+    app = get_uptodown_app(app_url)
+    apk_url = app.get("apkUrl", "")
+    if not apk_url:
+        raise ValueError("Uptodown did not expose a direct APK download for this app")
+    return download_url(apk_url, destination)
 
 
 def public_hostname(hostname: str) -> bool:
@@ -96,6 +307,10 @@ def download_url(url: str, destination: Path) -> tuple[str, int]:
     total = 0
     try:
         with urllib.request.urlopen(request, timeout=30) as response, destination.open("wb") as output:
+            final_hostname = urllib.parse.urlparse(response.geturl()).hostname
+            if not final_hostname:
+                raise ValueError("APK download did not return a valid host")
+            public_hostname(final_hostname)
             while True:
                 chunk = response.read(1024 * 1024)
                 if not chunk:
@@ -108,6 +323,10 @@ def download_url(url: str, destination: Path) -> tuple[str, int]:
         raise ValueError(f"could not download APK URL: {exc}") from exc
     if total == 0:
         raise ValueError("APK URL returned an empty file")
+    with destination.open("rb") as downloaded:
+        if downloaded.read(4) != b"PK\x03\x04":
+            destination.unlink(missing_ok=True)
+            raise ValueError("downloaded URL did not return an APK file")
     return Path(urllib.parse.unquote(parsed.path)).name or "download.apk", total
 
 
@@ -259,6 +478,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/health":
             self.send_json({"ok": True, "buildScript": BUILD_SCRIPT.exists()})
             return
+        if path == "/api/uptodown/search":
+            self.handle_uptodown_search(parsed)
+            return
+        if path == "/api/uptodown/app":
+            self.handle_uptodown_app(parsed)
+            return
         if path == "/favicon.ico":
             favicon = (
                 b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
@@ -293,6 +518,46 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.serve_file(WEB_ROOT / relative, mime)
             return
         self.send_error(HTTPStatus.NOT_FOUND)
+
+    def handle_uptodown_search(self, parsed: urllib.parse.ParseResult) -> None:
+        query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].strip()
+        if len(query) < 2 or len(query) > 80:
+            self.send_error_json("Enter at least 2 characters to search Uptodown")
+            return
+        encoded_query = urllib.parse.quote_plus(query)
+        last_error = "Uptodown search returned no results"
+        for template in UPTODOWN_SEARCH_URLS:
+            search_url = template.format(query=encoded_query)
+            try:
+                _, html = fetch_uptodown_page(search_url)
+                results = parse_uptodown_results(html, query)
+                self.send_json({"source": "uptodown", "query": query, "results": results})
+                return
+            except ValueError as exc:
+                last_error = str(exc)
+        # Uptodown also publishes app pages on <slug>.en.uptodown.com. This
+        # fallback keeps a one-word app lookup useful if their search route is
+        # temporarily unavailable while avoiding fabricated catalog entries.
+        try:
+            guessed_url = guessed_uptodown_app_url(query)
+            final_url, html = fetch_uptodown_page(guessed_url)
+            app = get_uptodown_app(final_url)
+            if app["title"]:
+                self.send_json({"source": "uptodown", "query": query, "results": [app]})
+                return
+        except ValueError as exc:
+            last_error = str(exc) if "not serving" not in str(exc).lower() else last_error
+        self.send_error_json(last_error, HTTPStatus.BAD_GATEWAY)
+
+    def handle_uptodown_app(self, parsed: urllib.parse.ParseResult) -> None:
+        url = urllib.parse.parse_qs(parsed.query).get("url", [""])[0].strip()
+        if not url:
+            self.send_error_json("An Uptodown app URL is required")
+            return
+        try:
+            self.send_json({"source": "uptodown", **get_uptodown_app(url)})
+        except ValueError as exc:
+            self.send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
 
     def serve_file(self, path: Path, content_type: str) -> None:
         if not path.is_file():
@@ -382,11 +647,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         launch_mode = fields.get("launch_mode", "singleTask")
         signing_mode = fields.get("signing_mode", "debug")
         apk_url = fields.get("apk_url", "")
+        uptodown_app_url = fields.get("uptodown_app_url", "")
         if launch_mode not in ALLOWED_LAUNCH_MODES:
             raise ValueError("unsupported launch mode")
         if signing_mode not in ALLOWED_SIGNING_MODES:
             raise ValueError("unsupported signing mode")
-        if not upload and not apk_url:
+        if uptodown_app_url and not is_uptodown_url(uptodown_app_url):
+            raise ValueError("Uptodown app URL is invalid")
+        if not upload and not apk_url and not uptodown_app_url:
             raise ValueError("choose an APK file or paste an APK URL")
         if upload and len(upload) > MAX_APK_BYTES:
             raise ValueError("APK is larger than the 650 MB upload limit")
@@ -397,7 +665,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         job = BuildJob(
             job_id,
             directory,
-            upload_name if upload else apk_url,
+            upload_name if upload else (fields.get("source_name") or apk_url or "uptodown-app.apk"),
             component,
             launch_mode,
             signing_mode,
@@ -406,9 +674,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
             job.input_path.write_bytes(upload)
             job.log(f"Received upload: {upload_name} ({len(upload) / 1024 / 1024:.1f} MB)")
         else:
-            job.log(f"Downloading APK from: {apk_url}")
+            if uptodown_app_url:
+                job.log(f"Resolving APK from Uptodown: {uptodown_app_url}")
+            else:
+                job.log(f"Downloading APK from: {apk_url}")
             try:
-                remote_name, size = download_url(apk_url, job.input_path)
+                if uptodown_app_url:
+                    remote_name, size = download_uptodown_app(uptodown_app_url, job.input_path)
+                else:
+                    remote_name, size = download_url(apk_url, job.input_path)
                 job.source_name = safe_name(remote_name)
                 job.log(f"Downloaded {job.source_name} ({size / 1024 / 1024:.1f} MB)")
             except Exception:

@@ -23,6 +23,8 @@ signature. Only use this with APKs you are authorized to modify.
 The Replit workflow starts the dashboard automatically on port 5000. It
 provides:
 
+- Uptodown app search with selectable app cards and server-side APK link
+  resolution.
 - Local APK upload or a public direct APK URL.
 - Automatic `MAIN` / `LAUNCHER` activity selection, plus an optional component
   field for choosing a specific activity or alias.
@@ -30,8 +32,11 @@ provides:
 - Generated debug or test signing keys.
 - Live build logs and a download button when the patched APK is ready.
 
-Builds run one at a time and APK files remain in the workspace. The server does
-not accept keystores or signing passwords.
+Builds run one at a time and APK files remain in the workspace. Selecting an
+Uptodown result resolves and downloads the APK into the job directory, then
+the dashboard invokes the same `build.sh` pipeline used by the CLI. The server
+does not accept keystores or signing passwords. Uptodown must be reachable and
+must expose a direct APK download for the selected app.
 
 ## CLI quick start
 

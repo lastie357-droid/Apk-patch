@@ -1,1 +1,2 @@
 - [Android APK patcher bootstrap](android-apk-patcher.md) — sdkmanager needs the bootstrapped JDK on PATH; pipefail makes yes exit 141 after licenses finish.
+- [Uptodown availability](uptodown-availability.md) — Uptodown catalog and app domains returned HTTP 410 during integration testing; keep the store adapter failure-explicit.
