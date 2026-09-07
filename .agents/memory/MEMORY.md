@@ -1,0 +1,1 @@
+- [Android APK patcher bootstrap](android-apk-patcher.md) — sdkmanager needs the bootstrapped JDK on PATH; pipefail makes yes exit 141 after licenses finish.

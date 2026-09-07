@@ -1,0 +1,7 @@
+.android-tools/
+.apk-work/
+.cache/test-apk/
+out/
+*.external.apk
+*.debug.keystore
+*.idsig
