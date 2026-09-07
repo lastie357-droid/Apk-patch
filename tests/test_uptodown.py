@@ -3,6 +3,7 @@ import unittest
 from server import (
     find_uptodown_download_url,
     is_uptodown_url,
+    parse_web_search_results,
     parse_uptodown_results,
 )
 
@@ -21,6 +22,15 @@ HTML = """
     <a href="https://dw.uptodown.com/dwn/example/termux.apk">Download</a>
   </body>
 </html>
+"""
+
+
+BING_HTML = """
+<html><body>
+<a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly9jaHJvbWUuZW4udXB0b2Rvd24uY29tL2FuZHJvaWQ">
+  Google Chrome for Android - Download from Uptodown
+</a>
+</body></html>
 """
 
 
@@ -45,6 +55,10 @@ class UptodownAdapterTests(unittest.TestCase):
         self.assertTrue(is_uptodown_url("https://dw.uptodown.com/dwn/example/app.apk"))
         self.assertFalse(is_uptodown_url("https://example.com/app.apk"))
         self.assertFalse(is_uptodown_url("file:///tmp/app.apk"))
+
+    def test_web_search_results_decode_bing_redirects(self):
+        results = parse_web_search_results(BING_HTML, "chrome")
+        self.assertEqual(results[0]["url"], "https://chrome.en.uptodown.com/android")
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ The Replit workflow starts the dashboard automatically on port 5000. It
 provides:
 
 - Uptodown app search with selectable app cards and server-side APK link
-  resolution.
+  resolution when Uptodown exposes a direct file.
 - Local APK upload or a public direct APK URL.
 - Automatic `MAIN` / `LAUNCHER` activity selection, plus an optional component
   field for choosing a specific activity or alias.
@@ -33,10 +33,14 @@ provides:
 - Live build logs and a download button when the patched APK is ready.
 
 Builds run one at a time and APK files remain in the workspace. Selecting an
-Uptodown result resolves and downloads the APK into the job directory, then
-the dashboard invokes the same `build.sh` pipeline used by the CLI. The server
-does not accept keystores or signing passwords. Uptodown must be reachable and
-must expose a direct APK download for the selected app.
+Uptodown result resolves and downloads the APK into the job directory when a
+direct file is available, then the dashboard invokes the same `build.sh`
+pipeline used by the CLI. The server does not accept keystores or signing
+passwords. Uptodown metadata can be loaded through a translated proxy when
+the direct catalog returns HTTP 410. Its current download page uses a
+Cloudflare Turnstile challenge and may not expose a server-downloadable APK;
+in that case the dashboard explains the limitation and the app can be
+downloaded in a browser and uploaded through the normal local APK flow.
 
 ## CLI quick start
 

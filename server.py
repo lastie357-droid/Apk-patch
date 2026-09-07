@@ -13,6 +13,7 @@ import ipaddress
 import json
 import os
 import re
+import base64
 import shutil
 import socket
 import subprocess
@@ -47,11 +48,15 @@ UPTODOWN_SEARCH_URLS = (
     os.environ.get("UPTODOWN_SEARCH_URL", "https://en.uptodown.com/android/search?query={query}"),
     "https://www.uptodown.com/android/search?query={query}",
 )
+WEB_SEARCH_URL = "https://www.bing.com/search?q={query}"
 UPTODOWN_HOSTS = {"uptodown.com", "www.uptodown.com", "en.uptodown.com"}
 UPTODOWN_HOST_SUFFIX = ".uptodown.com"
 BUILD_LOCK = threading.Semaphore(1)
 JOBS: dict[str, "BuildJob"] = {}
 JOBS_LOCK = threading.RLock()
+UPTODOWN_PAGE_CACHE: dict[str, tuple[float, str, str]] = {}
+UPTODOWN_CACHE_LOCK = threading.RLock()
+UPTODOWN_CACHE_SECONDS = 300
 
 
 def now_iso() -> str:
@@ -85,6 +90,29 @@ def normalize_uptodown_url(url: str, base_url: str = "https://en.uptodown.com/an
     if parsed.scheme == "http":
         candidate = urllib.parse.urlunparse(parsed._replace(scheme="https"))
     return candidate if is_uptodown_url(candidate) else None
+
+
+def uptodown_translate_url(url: str) -> str:
+    """Build the Google Translate HTML proxy URL used when Uptodown returns 410."""
+    parsed = urllib.parse.urlparse(url)
+    hostname = (parsed.hostname or "").lower()
+    proxy_host = f"{hostname.replace('.', '-')}.translate.goog"
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query.extend(
+        [
+            ("_x_tr_sl", "auto"),
+            ("_x_tr_tl", "en"),
+            ("_x_tr_hl", "en"),
+            ("_x_tr_pto", "wapp"),
+        ]
+    )
+    return urllib.parse.urlunparse(
+        parsed._replace(
+            scheme="https",
+            netloc=proxy_host,
+            query=urllib.parse.urlencode(query),
+        )
+    )
 
 
 class UptodownHTMLParser(HTMLParser):
@@ -128,8 +156,63 @@ class UptodownHTMLParser(HTMLParser):
 def fetch_uptodown_page(url: str) -> tuple[str, str]:
     if not is_uptodown_url(url):
         raise ValueError("Uptodown URL is not valid")
+    with UPTODOWN_CACHE_LOCK:
+        cached = UPTODOWN_PAGE_CACHE.get(url)
+        if cached and cached[0] > time.time():
+            return cached[1], cached[2]
+        if cached:
+            UPTODOWN_PAGE_CACHE.pop(url, None)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml",
+    }
+    direct_error: str | None = None
+    for candidate, proxied in ((url, False), (uptodown_translate_url(url), True)):
+        request = urllib.request.Request(candidate, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                html = response.read(2 * 1024 * 1024).decode("utf-8", "replace")
+                if proxied:
+                    with UPTODOWN_CACHE_LOCK:
+                        UPTODOWN_PAGE_CACHE[url] = (
+                            time.time() + UPTODOWN_CACHE_SECONDS,
+                            url,
+                            html,
+                        )
+                    return url, html
+                final_url = response.geturl()
+                if not is_uptodown_url(final_url):
+                    raise ValueError("Uptodown redirected to an unsupported host")
+                with UPTODOWN_CACHE_LOCK:
+                    UPTODOWN_PAGE_CACHE[url] = (
+                        time.time() + UPTODOWN_CACHE_SECONDS,
+                        final_url,
+                        html,
+                    )
+                return final_url, html
+        except urllib.error.HTTPError as exc:
+            if not proxied and exc.code == 404:
+                raise ValueError("Uptodown app page was not found") from exc
+            if exc.code in {410, 429}:
+                direct_error = f"HTTP {exc.code}"
+                continue
+            if proxied:
+                raise ValueError(f"Uptodown proxy returned HTTP {exc.code}") from exc
+            direct_error = f"HTTP {exc.code}"
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            if proxied:
+                raise ValueError(f"could not reach Uptodown proxy: {exc}") from exc
+            direct_error = str(exc)
+    raise ValueError(
+        "Uptodown catalog is blocked for this server and its translated proxy "
+        f"could not serve the page ({direct_error or 'unknown error'})"
+    )
+
+
+def fetch_web_search_page(query: str) -> str:
     request = urllib.request.Request(
-        url,
+        WEB_SEARCH_URL.format(query=urllib.parse.quote_plus(query)),
         headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/124 Safari/537.36",
@@ -138,20 +221,9 @@ def fetch_uptodown_page(url: str) -> tuple[str, str]:
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            final_url = response.geturl()
-            if not is_uptodown_url(final_url):
-                raise ValueError("Uptodown redirected to an unsupported host")
-            return final_url, response.read(2 * 1024 * 1024).decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise ValueError("Uptodown app page was not found") from exc
-        if exc.code == 410:
-            raise ValueError(
-                "Uptodown is not serving its catalog from this environment right now"
-            ) from exc
-        raise ValueError(f"Uptodown returned HTTP {exc.code}") from exc
+            return response.read(4 * 1024 * 1024).decode("utf-8", "replace")
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise ValueError(f"could not reach Uptodown: {exc}") from exc
+        raise ValueError(f"could not reach the web search provider: {exc}") from exc
 
 
 def parse_uptodown_results(html: str, query: str) -> list[dict[str, str]]:
@@ -190,6 +262,51 @@ def parse_uptodown_results(html: str, query: str) -> list[dict[str, str]]:
     return results
 
 
+def parse_web_search_results(html: str, query: str) -> list[dict[str, str]]:
+    """Extract Uptodown app pages from Bing's redirect-wrapped result links."""
+    parser = UptodownHTMLParser()
+    parser.feed(html)
+    query_terms = [term for term in re.split(r"\s+", query.lower().strip()) if term]
+    results: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for link in parser.links:
+        href = unescape(link.get("href", "")).strip()
+        parsed_href = urllib.parse.urlparse(href)
+        target = href
+        encoded_target = urllib.parse.parse_qs(parsed_href.query).get("u", [""])[0]
+        if encoded_target:
+            try:
+                padded = encoded_target[2:] + "=" * (-len(encoded_target[2:]) % 4)
+                target = base64.urlsafe_b64decode(padded).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                continue
+        url = normalize_uptodown_url(target)
+        if not url or url in seen:
+            continue
+        parsed = urllib.parse.urlparse(url)
+        if parsed.hostname == "dw.uptodown.com" or "/android" not in parsed.path.lower():
+            continue
+        title = unescape(link.get("title") or link.get("text") or "").strip()
+        if not title:
+            continue
+        haystack = f"{title} {url}".lower()
+        if query_terms and not any(term in haystack for term in query_terms):
+            continue
+        seen.add(url)
+        results.append(
+            {
+                "id": url,
+                "title": title[:160],
+                "url": url,
+                "summary": "",
+                "icon": "",
+            }
+        )
+        if len(results) >= 24:
+            break
+    return results
+
+
 def guessed_uptodown_app_url(query: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", query.lower()).strip("-")
     return f"https://{slug}.en.uptodown.com/android"
@@ -208,8 +325,6 @@ def find_uptodown_download_url(page_url: str, html: str) -> str | None:
         text = f"{link.get('text', '')} {link.get('title', '')}".lower()
         if path.endswith(".apk") or parsed.hostname == "dw.uptodown.com":
             score = 0
-        elif "/download" in path or "download" in text:
-            score = 10
         else:
             continue
         candidates.append((score, url))
@@ -231,11 +346,7 @@ def find_uptodown_download_url(page_url: str, html: str) -> str | None:
     return candidates[0][1]
 
 
-def get_uptodown_app(url: str) -> dict[str, str]:
-    normalized = normalize_uptodown_url(url)
-    if not normalized:
-        raise ValueError("Choose an app from Uptodown search results")
-    final_url, html = fetch_uptodown_page(normalized)
+def parse_uptodown_app(final_url: str, html: str) -> dict[str, str]:
     parser = UptodownHTMLParser()
     parser.feed(html)
     download_url = find_uptodown_download_url(final_url, html) or ""
@@ -262,7 +373,20 @@ def get_uptodown_app(url: str) -> dict[str, str]:
         "summary": unescape(description).strip()[:300],
         "icon": icon,
         "apkUrl": download_url,
+        "downloadPage": normalize_uptodown_url(
+            urllib.parse.urljoin(final_url, "/android/download")
+        )
+        or final_url,
+        "downloadRequiresBrowser": not bool(download_url),
     }
+
+
+def get_uptodown_app(url: str) -> dict[str, str]:
+    normalized = normalize_uptodown_url(url)
+    if not normalized:
+        raise ValueError("Choose an app from Uptodown search results")
+    final_url, html = fetch_uptodown_page(normalized)
+    return parse_uptodown_app(final_url, html)
 
 
 def download_uptodown_app(app_url: str, destination: Path) -> tuple[str, int]:
@@ -531,17 +655,37 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 _, html = fetch_uptodown_page(search_url)
                 results = parse_uptodown_results(html, query)
-                self.send_json({"source": "uptodown", "query": query, "results": results})
-                return
+                if results:
+                    self.send_json({"source": "uptodown", "query": query, "results": results})
+                    return
             except ValueError as exc:
                 last_error = str(exc)
+        # The catalog search route itself is currently retired for this
+        # environment, but public web search still indexes the app pages.
+        try:
+            results = parse_web_search_results(
+                fetch_web_search_page(f"site:uptodown.com/android {query}"),
+                query,
+            )
+            if results:
+                self.send_json(
+                    {
+                        "source": "uptodown",
+                        "query": query,
+                        "results": results,
+                        "via": "web-search",
+                    }
+                )
+                return
+        except ValueError as exc:
+            last_error = str(exc)
         # Uptodown also publishes app pages on <slug>.en.uptodown.com. This
         # fallback keeps a one-word app lookup useful if their search route is
         # temporarily unavailable while avoiding fabricated catalog entries.
         try:
             guessed_url = guessed_uptodown_app_url(query)
             final_url, html = fetch_uptodown_page(guessed_url)
-            app = get_uptodown_app(final_url)
+            app = parse_uptodown_app(final_url, html)
             if app["title"]:
                 self.send_json({"source": "uptodown", "query": query, "results": [app]})
                 return

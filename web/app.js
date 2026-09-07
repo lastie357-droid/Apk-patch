@@ -130,20 +130,29 @@ async function selectStoreApp(app) {
   storeSearchButton.disabled = true;
   setStoreStatus(`Resolving ${app.title} APK…`);
   try {
-    const response = await fetch(`/api/uptodown/app?url=${encodeURIComponent(app.url)}`, { cache: "no-store" });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || "Could not load this Uptodown app");
-    if (!result.apkUrl) throw new Error("Uptodown did not expose a direct APK for this app");
+    let result = app.downloadRequiresBrowser ? app : null;
+    if (!result) {
+      const response = await fetch(`/api/uptodown/app?url=${encodeURIComponent(app.url)}`, { cache: "no-store" });
+      result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not load this Uptodown app");
+    }
     fileInput.value = "";
     setSelectedFile(null);
     uptodownAppUrl.value = result.url;
     sourceName.value = result.title;
-    urlInput.value = result.apkUrl;
+    urlInput.value = result.apkUrl || "";
     storeSelection.classList.remove("hidden");
     storeSelectionTitle.textContent = result.title;
-    storeSelectionDetail.textContent = "Uptodown APK resolved · ready to build";
+    storeSelectionDetail.textContent = result.apkUrl
+      ? "Uptodown APK resolved · ready to build"
+      : "Browser download required before building";
     renderStoreIcon(storeSelectionIcon, result.icon, "APK");
-    setStoreStatus("Store source selected. Start the build when ready.", "success");
+    setStoreStatus(
+      result.apkUrl
+        ? "Store source selected. Start the build when ready."
+        : "Uptodown requires an interactive browser challenge for this APK. Open the app page, download the APK, then upload it here.",
+      result.apkUrl ? "success" : "warning",
+    );
     storeResults.replaceChildren();
   } catch (error) {
     setStoreStatus(error.message, "error");

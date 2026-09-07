@@ -86,7 +86,7 @@ h1 em { color: var(--lime); font-style: normal; }
 .store-search button:hover { background: #e6ff8c; }.store-search button:disabled { cursor: wait; opacity: .6; }
 .store-browser > .field-hint { margin-bottom: 0; }
 .store-status { color: var(--muted); min-height: 18px; margin-top: 12px; font: 10px "DM Mono", monospace; }
-.store-status.error { color: var(--danger); }.store-status.success { color: var(--cyan); }
+.store-status.error { color: var(--danger); }.store-status.success { color: var(--cyan); }.store-status.warning { color: #e2c96d; }
 .store-results { display: grid; gap: 7px; margin-top: 2px; }
 .store-result { display: flex; align-items: center; gap: 11px; width: 100%; color: var(--text); text-align: left; background: #151c18; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; padding: 9px 11px; }
 .store-result:hover, .store-result:focus-visible { border-color: var(--lime); background: #202b22; outline: none; }
