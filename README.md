@@ -1,7 +1,8 @@
 # APK external-intent patcher
 
-`build.sh` decompiles an APK with Apktool, changes one launchable component,
-rebuilds it, zip-aligns it, and signs the result with a temporary debug key.
+Intent Forge includes a dashboard and a CLI. Both decompile an APK with
+Apktool, change one launchable component, rebuild it, zip-align it, and sign
+the result with a temporary generated key.
 
 The default manifest change is:
 
@@ -17,7 +18,22 @@ the existing activity's `onNewIntent()` callback. It does **not** make arbitrary
 internal app code callable, and it does not preserve the original APK
 signature. Only use this with APKs you are authorized to modify.
 
-## Quick start
+## Dashboard
+
+The Replit workflow starts the dashboard automatically on port 5000. It
+provides:
+
+- Local APK upload or a public direct APK URL.
+- Automatic `MAIN` / `LAUNCHER` activity selection, plus an optional component
+  field for choosing a specific activity or alias.
+- `singleTask`, `singleTop`, `standard`, and `singleInstance` choices.
+- Generated debug or test signing keys.
+- Live build logs and a download button when the patched APK is ready.
+
+Builds run one at a time and APK files remain in the workspace. The server does
+not accept keystores or signing passwords.
+
+## CLI quick start
 
 ```bash
 ./build.sh --fetch-test-apk --output ./out/termux.external.apk
@@ -39,6 +55,7 @@ If an APK has multiple launchable activities, select one explicitly:
 ./build.sh ./input.apk \
   --component com.example.app.MainActivity \
   --launch-mode singleTask \
+  --signing-mode test \
   --output ./out/input.external.apk
 ```
 
@@ -46,7 +63,8 @@ Supported launch modes are `standard`, `singleTop`, `singleTask`, and
 `singleInstance`. `singleTask` is the default because it reuses the existing
 task instead of creating another activity instance. If the existing activity
 is not at the top of its task, Android may finish activities above it as part
-of normal `singleTask` behavior.
+of normal `singleTask` behavior. `--signing-mode` accepts `debug` or `test`;
+both keys are generated temporarily for testing.
 
 ## Calling the patched APK
 
@@ -64,8 +82,17 @@ startActivity(intent);
 ```
 
 The caller needs whatever normal Android permission or package-visibility rules
-apply to its own use case. The patched APK is signed with a new debug key, so
-it cannot be installed as an update over the original signed APK.
+apply to its own use case. The patched APK is signed with a new key, so it
+cannot be installed as an update over the original signed APK. To update the
+original app, use the downloaded APK as an input to the Android SDK's
+`zipalign` and `apksigner` tools locally with the original publisher key.
+Intent Forge never receives that key:
+
+```bash
+zipalign -p -f 4 patched.apk aligned.apk
+apksigner sign --ks /path/to/original-key.jks aligned.apk
+apksigner verify aligned.apk
+```
 
 ## Bootstrapped tools
 

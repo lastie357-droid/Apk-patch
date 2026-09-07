@@ -39,6 +39,7 @@ export ANDROID_SDK_ROOT
 KEEP_WORKDIR=0
 COMPONENT=""
 LAUNCH_MODE="singleTask"
+SIGNING_MODE="debug"
 OUTPUT=""
 INPUT=""
 FETCH_TEST_APK=0
@@ -64,6 +65,8 @@ Options:
                             the MAIN/LAUNCHER component is selected.
   --launch-mode MODE        standard, singleTop, singleTask, or singleInstance.
                             Default: singleTask.
+  --signing-mode MODE       debug or test. Both use a generated local key.
+                            Default: debug.
   --fetch-test-apk          Download the pinned F-Droid Termux APK and use it.
   --keep-workdir            Keep the decoded/rebuilt working directory.
   --help                    Show this help.
@@ -313,6 +316,11 @@ parse_args() {
         LAUNCH_MODE="$2"
         shift 2
         ;;
+      --signing-mode)
+        [[ $# -ge 2 ]] || die "--signing-mode requires a value"
+        SIGNING_MODE="$2"
+        shift 2
+        ;;
       --fetch-test-apk)
         FETCH_TEST_APK=1
         shift
@@ -338,6 +346,8 @@ parse_args() {
 
   [[ "$LAUNCH_MODE" =~ ^(standard|singleTop|singleTask|singleInstance)$ ]] || \
     die "invalid --launch-mode '$LAUNCH_MODE'"
+  [[ "$SIGNING_MODE" =~ ^(debug|test)$ ]] || \
+    die "invalid --signing-mode '$SIGNING_MODE' (use debug or test)"
   [[ "$FETCH_TEST_APK" == 0 || -z "$INPUT" ]] || \
     die "do not provide an input APK together with --fetch-test-apk"
   if [[ "$FETCH_TEST_APK" == 1 ]]; then
@@ -384,7 +394,16 @@ main() {
   local decoded="$workdir/decoded"
   local unsigned="$workdir/rebuilt-unsigned.apk"
   local aligned="$workdir/rebuilt-aligned.apk"
-  local keystore="$workdir/debug.keystore"
+  local keystore="$workdir/${SIGNING_MODE}.keystore"
+  local signing_alias
+  local signing_name
+  if [[ "$SIGNING_MODE" == "test" ]]; then
+    signing_alias="apkintenttest"
+    signing_name="APK Intent Test"
+  else
+    signing_alias="androiddebugkey"
+    signing_name="Android Debug"
+  fi
   local keytool_bin
   if [[ -x "${JAVA_HOME}/bin/keytool" ]]; then
     keytool_bin="${JAVA_HOME}/bin/keytool"
@@ -415,14 +434,14 @@ main() {
   info "aligning APK"
   "$ZIPALIGN" -p -f 4 "$unsigned" "$aligned"
 
-  info "creating test signing key"
+  info "creating $SIGNING_MODE signing key"
   "$keytool_bin" \
     -genkeypair -noprompt \
     -keystore "$keystore" \
     -storepass android -keypass android \
-    -alias androiddebugkey \
+    -alias "$signing_alias" \
     -keyalg RSA -keysize 2048 -validity 10000 \
-    -dname "CN=Android Debug,O=Android,C=US" >/dev/null 2>&1
+    -dname "CN=$signing_name,O=APK Intent Patcher,C=US" >/dev/null 2>&1
 
   info "signing APK"
   "$APKSIGNER" sign \

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#101413">
+    <title>Intent Forge · APK Patcher</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <strong>Intent Forge</strong>
+            <small>APK patch studio</small>
+          </div>
+        </div>
+        <nav class="side-nav" aria-label="Primary navigation">
+          <a class="nav-item active" href="#builder"><span class="nav-icon">✦</span>New build</a>
+          <a class="nav-item" href="#how-it-works"><span class="nav-icon">◎</span>How it works</a>
+          <a class="nav-item" href="#signing"><span class="nav-icon">⌁</span>Signing guide</a>
+        </nav>
+        <div class="side-note">
+          <span class="mini-dot"></span>
+          <div><strong>Local processing</strong><p>Your APK stays in this workspace.</p></div>
+        </div>
+        <div class="sidebar-footer">
+          <span class="status-dot"></span><span id="health-label">Toolchain standing by</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="crumbs"><span>Workspace</span><b>/</b><strong>New build</strong></div>
+          <a class="docs-link" href="#signing">Read the signing guide <span>↗</span></a>
+        </header>
+
+        <div class="content">
+          <section class="hero" id="builder">
+            <div>
+              <div class="eyebrow"><span class="eyebrow-line"></span>MANIFEST WORKBENCH</div>
+              <h1>Make your APK<br><em>intent-ready.</em></h1>
+              <p class="hero-copy">Patch a launchable activity to accept explicit intents, reuse its existing task, and hand the rebuilt APK back to you.</p>
+            </div>
+            <div class="hero-badge"><span class="hero-badge-icon">↗</span><span>Fast, local<br><b>and reversible</b></span></div>
+          </section>
+
+          <div class="workspace-grid">
+            <section class="panel builder-panel">
+              <div class="panel-heading">
+                <div><div class="section-kicker">01 <span>·</span> SOURCE APK</div><h2>Bring an app to patch</h2></div>
+                <span class="required-label">Required</span>
+              </div>
+              <form id="build-form">
+                <label class="dropzone" id="dropzone" for="apk-file">
+                  <input id="apk-file" name="apk" type="file" accept=".apk,application/vnd.android.package-archive">
+                  <div class="upload-glyph"><span>↑</span></div>
+                  <div class="drop-copy"><strong id="file-label">Drop an APK here</strong><span id="file-detail">or click to browse from your device</span></div>
+                  <span class="file-limit">.APK <b>·</b> max 650 MB</span>
+                </label>
+                <div class="or-divider"><span>OR USE A DIRECT LINK</span></div>
+                <label class="field-label" for="apk-url">APK URL <span>Optional</span></label>
+                <div class="url-field"><span class="url-prefix">↗</span><input id="apk-url" name="apk_url" type="url" placeholder="https://example.com/releases/app.apk"><button type="button" id="clear-url" aria-label="Clear APK URL">×</button></div>
+                <p class="field-hint">Use a public direct download link. The server validates the host before downloading.</p>
+
+                <div class="form-divider"></div>
+                <div class="section-kicker">02 <span>·</span> PATCH SETTINGS</div>
+                <div class="fields-grid">
+                  <div class="field-block">
+                    <label class="field-label" for="component">Target activity <span>Optional</span></label>
+                    <input class="text-input" id="component" name="component" type="text" placeholder="Auto-detect launcher activity">
+                    <p class="field-hint">Leave blank to use the app’s MAIN / LAUNCHER activity.</p>
+                  </div>
+                  <div class="field-block">
+                    <label class="field-label" for="launch-mode">Reuse behavior</label>
+                    <select class="text-input" id="launch-mode" name="launch_mode">
+                      <option value="singleTask" selected>singleTask — reuse existing task</option>
+                      <option value="singleTop">singleTop — reuse when on top</option>
+                      <option value="standard">standard — always allow a new instance</option>
+                      <option value="singleInstance">singleInstance — isolated task</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-divider"></div>
+                <div class="section-kicker">03 <span>·</span> TEST SIGNING</div>
+                <div class="signing-options">
+                  <label class="sign-option selected"><input type="radio" name="signing_mode" value="debug" checked><span class="radio-ui"></span><span class="sign-icon debug">⌁</span><span class="sign-copy"><strong>Debug key</strong><small>Generated for local installs</small></span><span class="recommended">Recommended</span></label>
+                  <label class="sign-option"><input type="radio" name="signing_mode" value="test"><span class="radio-ui"></span><span class="sign-icon test">◇</span><span class="sign-copy"><strong>Test key</strong><small>Generated for QA sharing</small></span></label>
+                </div>
+                <div class="signing-note"><span>i</span><p>Both options create a new test signature. To update the original app, download the result and sign it locally with your own key.</p></div>
+                <button class="primary-button" id="build-button" type="submit"><span class="button-icon">✦</span><span id="build-button-label">Patch &amp; build APK</span><span class="button-arrow">→</span></button>
+                <p class="privacy-line"><span>▣</span> No keys are uploaded. Build logs and artifacts are temporary workspace files.</p>
+              </form>
+            </section>
+
+            <aside class="right-rail">
+              <section class="panel outcome-panel">
+                <div class="panel-heading compact"><div><div class="section-kicker">BUILD OUTPUT</div><h2>Your result</h2></div><span class="status-pill idle" id="status-pill">Idle</span></div>
+                <div class="empty-result" id="empty-result">
+                  <div class="empty-orbit"><div class="orbit-dot"></div><div class="orbit-ring"></div><span>✦</span></div>
+                  <strong>Nothing built yet</strong>
+                  <p>Your patched APK and live build details will appear here.</p>
+                </div>
+                <div class="build-result hidden" id="build-result">
+                  <div class="result-file"><div class="apk-icon">APK</div><div><strong id="result-name">patched-app.external.apk</strong><small id="result-meta">Signed test artifact</small></div></div>
+                  <a class="download-button" id="download-button" href="#"><span>↓</span>Download APK</a>
+                  <div class="result-checks"><span>✓ Manifest patched</span><span>✓ Signed</span><span>✓ Zip-aligned</span></div>
+                </div>
+              </section>
+
+              <section class="panel logs-panel">
+                <div class="panel-heading compact"><div><div class="section-kicker">LIVE TELEMETRY</div><h2>Build log</h2></div><span class="log-live" id="log-live"><i></i> Waiting</span></div>
+                <div class="terminal" id="terminal"><div class="terminal-line muted">Build output will stream here when you start a job.</div></div>
+              </section>
+
+              <section class="tip-card">
+                <div class="tip-icon">↯</div><div><strong>What gets changed?</strong><p>The selected activity becomes externally launchable and uses <code>singleTask</code> by default, so new intents arrive at the existing instance.</p></div>
+              </section>
+            </aside>
+          </div>
+
+          <section class="guide-section" id="how-it-works">
+            <div class="guide-heading"><div class="section-kicker">A SHORT TOUR</div><h2>From APK to intent-ready in three steps.</h2></div>
+            <div class="steps">
+              <div class="step"><span class="step-number">01</span><div class="step-icon">↥</div><h3>Upload or link</h3><p>Choose a local APK or paste a public direct download link. Nothing is sent to a third-party service.</p></div>
+              <div class="step"><span class="step-number">02</span><div class="step-icon">⌘</div><h3>Patch the manifest</h3><p>Apktool rebuilds the app after making its selected activity exported and intent-friendly.</p></div>
+              <div class="step"><span class="step-number">03</span><div class="step-icon">↓</div><h3>Download and test</h3><p>Get a zip-aligned, test-signed APK. Use your own signer later when you need an update-compatible release.</p></div>
+            </div>
+          </section>
+
+          <section class="signing-guide panel" id="signing">
+            <div class="guide-copy"><div class="section-kicker">BRING YOUR OWN SIGNER</div><h2>Need to update the original app?</h2><p>Test keys are intentionally different from the publisher’s key. Download the patched APK, then use your own Android SDK signing tools locally before distribution.</p></div>
+            <div class="code-card"><div class="code-label">LOCAL TERMINAL</div><code><span class="code-muted">zipalign -p -f 4</span> patched.apk aligned.apk<br><span class="code-muted">apksigner sign --ks</span> my-key.jks aligned.apk</code><a href="https://developer.android.com/tools/building/building-cmdline" target="_blank" rel="noreferrer">Android signing docs ↗</a></div>
+          </section>
+          <footer><span>Intent Forge</span><span>Built for authorized APK testing only · <a href="https://github.com/iBotPeaches/Apktool" target="_blank" rel="noreferrer">Powered by Apktool ↗</a></span></footer>
+        </div>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

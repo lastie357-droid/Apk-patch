@@ -5,3 +5,5 @@ out/
 *.external.apk
 *.debug.keystore
 *.idsig
+.dashboard/
+screenshots/
