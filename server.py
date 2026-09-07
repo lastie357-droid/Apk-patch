@@ -755,7 +755,7 @@ class UptodownBrowserSession:
                     "returnByValue": True,
                 },
             )
-            value = result.get("result", {}).get("result", {}).get("value")
+            value = result.get("result", {}).get("value")
             dimensions = json.loads(str(value))
             width = int(dimensions.get("width", 1280))
             height = int(dimensions.get("height", 900))
@@ -818,7 +818,7 @@ class UptodownBrowserSession:
             "Runtime.evaluate",
             {"expression": find_script, "returnByValue": True},
         )
-        value = result.get("result", {}).get("result", {}).get("value")
+        value = result.get("result", {}).get("value")
         if not isinstance(value, dict) or "index" not in value:
             return {"clicked": False, "label": ""}
         index = int(value["index"])
@@ -839,7 +839,7 @@ class UptodownBrowserSession:
                 "Runtime.evaluate",
                 {"expression": click_script, "returnByValue": True},
             )
-            did_click = clicked.get("result", {}).get("result", {}).get("value") is True
+            did_click = clicked.get("result", {}).get("value") is True
         except (ConnectionError, OSError, ValueError, TimeoutError):
             did_click = True
         time.sleep(0.25)
@@ -859,7 +859,7 @@ class UptodownBrowserSession:
                     "Runtime.evaluate",
                     {"expression": "window.location.href", "returnByValue": True},
                 )
-                current_url = location.get("result", {}).get("result", {}).get("value")
+                current_url = location.get("result", {}).get("value")
                 if current_url:
                     self.current_url = str(current_url)
             except (ConnectionError, OSError, ValueError, TimeoutError) as exc:
